@@ -11,11 +11,17 @@ st.set_page_config(
 from pages.helper.auth_manager import require_auth
 if not require_auth():
     st.switch_page("Home.py")
+    st.stop()
 
 from pages.helper.ui_theme import apply_theme, render_sidebar_user_profile
 apply_theme()
 user_info = st.session_state.get("user_info", {})
 role = st.session_state.get("role", "Officer")
+
+if role == "Reporter":
+    st.error("Use the sighting portal")
+    st.stop()
+
 render_sidebar_user_profile(user_info, role)
 
 st.markdown("""

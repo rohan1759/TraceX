@@ -1,16 +1,25 @@
 import os
+import io
 import urllib.request
 
 import cv2
 import PIL
+import PIL.Image
 import PIL.ImageDraw
 import PIL.ImageFont
+import PIL.ImageOps
 import numpy as np
 import streamlit as st
 import mediapipe as mp
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
 from insightface.app import FaceAnalysis
+
+# ── Upload & Video Named Constants ────────────────────────────────────────────
+MAX_IMAGE_UPLOAD_MB = 10
+MAX_VIDEO_UPLOAD_MB = 50
+MAX_VIDEO_SAMPLED_FRAMES = 120
+MAX_VIDEO_UNIQUE_FACES = 10
 
 _MODEL_PATH = "face_landmarker.task"
 _MODEL_URL = (
@@ -66,9 +75,166 @@ def _normalize_image(image: np.ndarray) -> np.ndarray:
 
 
 def image_obj_to_numpy(image_obj) -> np.ndarray:
-    """Convert a Streamlit-uploaded image object to an RGB numpy array."""
+    """Convert a Streamlit-uploaded image object or PIL Image to an RGB numpy array."""
+    if isinstance(image_obj, np.ndarray):
+        return _normalize_image(image_obj)
+    if isinstance(image_obj, PIL.Image.Image):
+        return np.array(image_obj.convert("RGB"))
     image = PIL.Image.open(image_obj).convert("RGB")
     return np.array(image)
+
+
+def save_display_image(
+    pil_or_array,
+    dest_path: str,
+    max_side: int = 1600,
+    quality: int = 90,
+) -> bool:
+    """
+    Save an image for display/reference with safe compression:
+    1. Apply ImageOps.exif_transpose, convert to RGB.
+    2. If the long side > max_side, resize with LANCZOS keeping aspect ratio; never upscale.
+    3. Save as JPEG with the given quality, no EXIF (this removes GPS data).
+    """
+    if isinstance(pil_or_array, np.ndarray):
+        img = PIL.Image.fromarray(_normalize_image(pil_or_array))
+    elif isinstance(pil_or_array, PIL.Image.Image):
+        img = pil_or_array.copy()
+    else:
+        img = PIL.Image.open(pil_or_array)
+
+    # 1. Apply ImageOps.exif_transpose, convert to RGB
+    img = PIL.ImageOps.exif_transpose(img)
+    img = img.convert("RGB")
+
+    # 2. If the long side > max_side, resize with LANCZOS keeping aspect ratio; never upscale
+    w, h = img.size
+    long_side = max(w, h)
+    if max_side is not None and max_side > 0 and long_side > max_side:
+        scale = max_side / float(long_side)
+        new_w = max(1, int(round(w * scale)))
+        new_h = max(1, int(round(h * scale)))
+        resample = getattr(PIL.Image, "Resampling", PIL.Image).LANCZOS
+        img = img.resize((new_w, new_h), resample=resample)
+
+    # 3. Save as JPEG with the given quality, no EXIF (strips GPS and metadata)
+    dest_dir = os.path.dirname(os.path.abspath(dest_path))
+    if dest_dir:
+        os.makedirs(dest_dir, exist_ok=True)
+
+    clean_img = PIL.Image.new("RGB", img.size)
+    clean_img.paste(img)
+    clean_img.save(dest_path, format="JPEG", quality=quality)
+    return True
+
+
+def validate_image_upload(uploaded_file, max_mb: int = MAX_IMAGE_UPLOAD_MB):
+    """
+    Validate an uploaded image file:
+    1. Reject if size > max_mb.
+    2. Open with Pillow and call verify(), then reopen; reject on any failure.
+    3. Check the real format is JPEG/PNG regardless of file extension.
+    4. Return the decoded, exif-transposed RGB PIL Image or an error message string.
+    """
+    if uploaded_file is None:
+        return "No image file provided."
+
+    # 1. Check size limit
+    size_bytes = None
+    if isinstance(uploaded_file, (str, os.PathLike)):
+        try:
+            size_bytes = os.path.getsize(uploaded_file)
+        except OSError as e:
+            return f"Cannot read image file: {e}"
+    elif hasattr(uploaded_file, "size"):
+        size_bytes = uploaded_file.size
+    elif hasattr(uploaded_file, "getbuffer"):
+        size_bytes = uploaded_file.getbuffer().nbytes
+    elif hasattr(uploaded_file, "seek") and hasattr(uploaded_file, "tell"):
+        pos = uploaded_file.tell()
+        uploaded_file.seek(0, os.SEEK_END)
+        size_bytes = uploaded_file.tell()
+        uploaded_file.seek(pos)
+
+    max_bytes = max_mb * 1024 * 1024
+    if size_bytes is not None and size_bytes > max_bytes:
+        mb_actual = size_bytes / (1024 * 1024)
+        return (
+            f"Image file size ({mb_actual:.1f} MB) exceeds maximum allowed limit of {max_mb} MB."
+        )
+
+    # 2. Open with Pillow and verify()
+    try:
+        if hasattr(uploaded_file, "seek"):
+            uploaded_file.seek(0)
+        img = PIL.Image.open(uploaded_file)
+        img.verify()
+    except Exception as e:
+        if hasattr(uploaded_file, "seek"):
+            uploaded_file.seek(0)
+        return f"Invalid or corrupted image file: {e}"
+
+    # 3. Reopen, check real format is JPEG/PNG, and decode
+    try:
+        if hasattr(uploaded_file, "seek"):
+            uploaded_file.seek(0)
+        img = PIL.Image.open(uploaded_file)
+        real_format = (img.format or "").upper()
+        if real_format not in ("JPEG", "JPG", "PNG"):
+            if hasattr(uploaded_file, "seek"):
+                uploaded_file.seek(0)
+            return (
+                f"Unsupported image format ({real_format or 'unknown'}). "
+                "Only JPEG and PNG images are allowed."
+            )
+
+        # 4. Decoded, exif-transposed RGB image
+        img = PIL.ImageOps.exif_transpose(img)
+        img = img.convert("RGB")
+        img.load()
+    except Exception as e:
+        if hasattr(uploaded_file, "seek"):
+            uploaded_file.seek(0)
+        return f"Failed to decode image data: {e}"
+
+    if hasattr(uploaded_file, "seek"):
+        uploaded_file.seek(0)
+
+    return img
+
+
+def validate_video_upload(uploaded_file, max_mb: int = MAX_VIDEO_UPLOAD_MB) -> str | None:
+    """
+    Validate uploaded video file size against the code limit.
+    Returns None if valid, or an error message string if invalid.
+    """
+    if uploaded_file is None:
+        return "No video file provided."
+
+    size_bytes = None
+    if isinstance(uploaded_file, (str, os.PathLike)):
+        try:
+            size_bytes = os.path.getsize(uploaded_file)
+        except OSError as e:
+            return f"Cannot read video file: {e}"
+    elif hasattr(uploaded_file, "size"):
+        size_bytes = uploaded_file.size
+    elif hasattr(uploaded_file, "getbuffer"):
+        size_bytes = uploaded_file.getbuffer().nbytes
+    elif hasattr(uploaded_file, "seek") and hasattr(uploaded_file, "tell"):
+        pos = uploaded_file.tell()
+        uploaded_file.seek(0, os.SEEK_END)
+        size_bytes = uploaded_file.tell()
+        uploaded_file.seek(pos)
+
+    max_bytes = max_mb * 1024 * 1024
+    if size_bytes is not None and size_bytes > max_bytes:
+        mb_actual = size_bytes / (1024 * 1024)
+        return (
+            f"Video file size ({mb_actual:.1f} MB) exceeds maximum allowed limit of {max_mb} MB."
+        )
+
+    return None
 
 
 # ── MediaPipe face detection & bounding boxes ─────────────────────────────────
@@ -316,10 +482,13 @@ def extract_unique_faces_from_video(
     video_path: str,
     frame_interval: int = 15,
     similarity_threshold: float = VIDEO_DEDUP_COSINE_DISTANCE_THRESHOLD,
+    max_sampled_frames: int = MAX_VIDEO_SAMPLED_FRAMES,
+    max_unique_faces: int = MAX_VIDEO_UNIQUE_FACES,
 ):
     """
     Extract unique face embeddings from a video file.
     Returns list of (embedding, frame_rgb) tuples — one per unique face.
+    Caps the number of sampled frames and unique faces.
     """
     _ensure_model_silent()
     cap = cv2.VideoCapture(video_path)
@@ -328,11 +497,15 @@ def extract_unique_faces_from_video(
 
     unique_faces = []
     frame_idx = 0
+    sampled_count = 0
     while True:
         ret, frame_bgr = cap.read()
         if not ret:
             break
         if frame_idx % frame_interval == 0:
+            sampled_count += 1
+            if max_sampled_frames is not None and sampled_count > max_sampled_frames:
+                break
             frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
             faces = detect_all_faces(frame_rgb, max_faces=1)
             if faces:
@@ -344,6 +517,8 @@ def extract_unique_faces_from_video(
                     )
                     if not is_duplicate:
                         unique_faces.append((embedding, frame_rgb))
+                        if max_unique_faces is not None and len(unique_faces) >= max_unique_faces:
+                            break
         frame_idx += 1
 
     cap.release()

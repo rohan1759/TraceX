@@ -1,3 +1,6 @@
+[server]
+maxUploadSize = 50
+
 [theme]
 primaryColor = "#FAFAFA"
 backgroundColor = "#090A0C"
@@ -11,3 +14,4 @@ showErrorDetails = false
 
 [ui]
 hideTopBar = false
+

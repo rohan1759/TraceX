@@ -49,6 +49,19 @@ class RegisteredCases(SQLModel, table=True):
     matched_with: str = Field(nullable=True)
 
 
+class UploadAudit(SQLModel, table=True):
+    __table_args__ = {"extend_existing": True}
+    id: int | None = Field(default=None, primary_key=True)
+    reporter_username: str = Field(max_length=128, nullable=False, index=True)
+    city: str | None = Field(default=None, max_length=128, nullable=True)
+    area: str | None = Field(default=None, max_length=128, nullable=True)
+    sighting_id: str = Field(max_length=128, nullable=False, index=True)
+    action: str = Field(max_length=32, nullable=False)
+    timestamp: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc), nullable=False
+    )
+
+
 if __name__ == "__main__":
     sqlite_url = "sqlite:///example.db"
     engine = create_engine(sqlite_url)

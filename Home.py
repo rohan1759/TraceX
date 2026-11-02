@@ -80,6 +80,14 @@ apply_theme()
 
 user_info = st.session_state.get("user_info", {})
 role = st.session_state.get("role", "Officer")
+
+if role == "Reporter":
+    st.error("Use the sighting portal")
+    if st.button("Sign Out"):
+        from pages.helper.auth_manager import logout_user
+        logout_user()
+    st.stop()
+
 is_admin = role.lower() == "admin"
 st.session_state["login_status"] = True
 

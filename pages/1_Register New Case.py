@@ -6,6 +6,7 @@ import json
 
 import streamlit as st
 
+import numpy as np
 from pages.helper.data_models import RegisteredCases
 from pages.helper import db_queries, utils
 from pages.helper.utils import (
@@ -13,6 +14,9 @@ from pages.helper.utils import (
     detect_all_faces,
     draw_face_boxes,
     extract_face_embedding,
+    validate_image_upload,
+    save_display_image,
+    MAX_IMAGE_UPLOAD_MB,
 )
 
 st.set_page_config(
@@ -24,11 +28,17 @@ st.set_page_config(
 
 if not require_auth():
     st.switch_page("Home.py")
+    st.stop()
 
 apply_theme()
 
 user_info = st.session_state.get("user_info", {})
 role = st.session_state.get("role", "Officer")
+
+if role == "Reporter":
+    st.error("Use the sighting portal")
+    st.stop()
+
 render_sidebar_user_profile(user_info, role)
 
 user = st.session_state.get("user", "officer")
@@ -150,7 +160,7 @@ if st.session_state.get("registered_case_id"):
         if st.button("＋ Register Another Case", key="btn_register_another", type="primary", use_container_width=True):
             st.session_state["nc_uploader_idx"] = st.session_state.get("nc_uploader_idx", 0) + 1
             for k in [
-                "nc_file_key", "nc_faces", "nc_image_numpy", "nc_unique_id",
+                "nc_file_key", "nc_val_error", "nc_faces", "nc_image_numpy", "nc_unique_id",
                 "nc_uploaded_path", "nc_face_choice", "registered_case_id",
                 "registered_case_name"
             ]:
@@ -161,7 +171,7 @@ if st.session_state.get("registered_case_id"):
         if st.button("View in All Cases →", key="btn_view_all_cases", use_container_width=True):
             st.session_state["nc_uploader_idx"] = st.session_state.get("nc_uploader_idx", 0) + 1
             for k in [
-                "nc_file_key", "nc_faces", "nc_image_numpy", "nc_unique_id",
+                "nc_file_key", "nc_val_error", "nc_faces", "nc_image_numpy", "nc_unique_id",
                 "nc_uploaded_path", "nc_face_choice", "registered_case_id",
                 "registered_case_name"
             ]:
@@ -192,7 +202,7 @@ with image_col:
         "Upload photo",
         type=["jpg", "jpeg", "png"],
         key=f"new_case_upload_{uploader_idx}",
-        help="High-resolution, front-facing photograph recommended. Max 200 MB.",
+        help=f"High-resolution, front-facing photograph recommended. Max {MAX_IMAGE_UPLOAD_MB} MB.",
         label_visibility="collapsed",
     )
 
@@ -200,71 +210,72 @@ with image_col:
         file_key = f"{image_obj.name}_{image_obj.size}"
 
         if st.session_state.get("nc_file_key") != file_key:
-            unique_id = str(uuid.uuid4())
-            os.makedirs("./resources", exist_ok=True)
-            uploaded_file_path = f"./resources/{unique_id}.jpg"
-
-            with open(uploaded_file_path, "wb") as f:
-                f.write(image_obj.read())
-            image_obj.seek(0)
-
-            with st.spinner("AI analyzing facial biometrics..."):
-                image_numpy = image_obj_to_numpy(image_obj)
-                faces = detect_all_faces(image_numpy, max_faces=5)
-
-            if not faces:
-                if os.path.exists(uploaded_file_path):
-                    os.remove(uploaded_file_path)
+            val_res = validate_image_upload(image_obj, max_mb=MAX_IMAGE_UPLOAD_MB)
+            if isinstance(val_res, str):
                 st.session_state["nc_file_key"] = file_key
+                st.session_state["nc_val_error"] = val_res
                 st.session_state["nc_faces"] = []
                 st.session_state["nc_image_numpy"] = None
                 st.session_state["nc_unique_id"] = None
-                st.session_state["nc_uploaded_path"] = None
             else:
+                image_numpy = np.array(val_res)
+                unique_id = str(uuid.uuid4())
+
+                with st.spinner("AI analyzing facial biometrics..."):
+                    faces = detect_all_faces(image_numpy, max_faces=5)
+
                 st.session_state["nc_file_key"] = file_key
+                st.session_state["nc_val_error"] = None
                 st.session_state["nc_faces"] = faces
                 st.session_state["nc_image_numpy"] = image_numpy
                 st.session_state["nc_unique_id"] = unique_id
-                st.session_state["nc_uploaded_path"] = uploaded_file_path
 
-        faces = st.session_state.get("nc_faces", [])
-        image_numpy = st.session_state.get("nc_image_numpy")
-        unique_id = st.session_state.get("nc_unique_id")
-
-        if not faces:
-            st.html("""
-            <div class="tx-face-status-err">
-                No face detected. Upload a clear, front-facing photograph in good lighting.
-            </div>
-            """)
+        val_error = st.session_state.get("nc_val_error")
+        if val_error:
+            st.error(val_error)
+            faces = []
+            image_numpy = None
+            unique_id = None
             selected_face_idx = None
-        elif len(faces) == 1:
-            annotated = draw_face_boxes(image_numpy, faces, selected_idx=0)
-            st.image(annotated, use_container_width=True)
-            st.html("""
-            <div class="tx-face-status-ok">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                     stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                  <polyline points="20 6 9 17 4 12"></polyline>
-                </svg>
-                1 face detected &mdash; Ready for biometric registration
-            </div>
-            """)
-            selected_face_idx = 0
         else:
-            st.warning(f"**{len(faces)} faces detected.** Select the missing person:")
-            options = [f"Face {i + 1}" for i in range(len(faces))]
-            choice = st.radio("Select target face", options, horizontal=True, key="nc_face_choice")
-            selected_face_idx = options.index(choice)
-            annotated = draw_face_boxes(image_numpy, faces, selected_idx=selected_face_idx)
-            st.image(annotated, use_container_width=True)
-            st.html(f"""
-            <div class="tx-face-status-ok">
-                Target selected: Face {selected_face_idx + 1}
-            </div>
-            """)
+            faces = st.session_state.get("nc_faces", [])
+            image_numpy = st.session_state.get("nc_image_numpy")
+            unique_id = st.session_state.get("nc_unique_id")
+
+            if not faces:
+                st.html("""
+                <div class="tx-face-status-err">
+                    No face detected. Upload a clear, front-facing photograph in good lighting.
+                </div>
+                """)
+                selected_face_idx = None
+            elif len(faces) == 1:
+                annotated = draw_face_boxes(image_numpy, faces, selected_idx=0)
+                st.image(annotated, use_container_width=True)
+                st.html("""
+                <div class="tx-face-status-ok">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                         stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                      <polyline points="20 6 9 17 4 12"></polyline>
+                    </svg>
+                    1 face detected &mdash; Ready for biometric registration
+                </div>
+                """)
+                selected_face_idx = 0
+            else:
+                st.warning(f"**{len(faces)} faces detected.** Select the missing person:")
+                options = [f"Face {i + 1}" for i in range(len(faces))]
+                choice = st.radio("Select target face", options, horizontal=True, key="nc_face_choice")
+                selected_face_idx = options.index(choice)
+                annotated = draw_face_boxes(image_numpy, faces, selected_idx=selected_face_idx)
+                st.image(annotated, use_container_width=True)
+                st.html(f"""
+                <div class="tx-face-status-ok">
+                    Target selected: Face {selected_face_idx + 1}
+                </div>
+                """)
     else:
-        for k in ["nc_file_key", "nc_faces", "nc_image_numpy", "nc_unique_id", "nc_uploaded_path"]:
+        for k in ["nc_file_key", "nc_val_error", "nc_faces", "nc_image_numpy", "nc_unique_id"]:
             st.session_state.pop(k, None)
         selected_face_idx = None
         unique_id = None
@@ -409,6 +420,20 @@ with form_col:
                             "Please upload a clearer, front-facing photograph."
                         )
                     else:
+                        # Order: validate -> detect face -> compute embedding from original -> save_display_image -> insert DB
+                        os.makedirs("./resources", exist_ok=True)
+                        dest_path = f"./resources/{unique_id}.jpg"
+                        try:
+                            save_display_image(image_numpy, dest_path, max_side=1600, quality=90)
+                        except Exception as e:
+                            if os.path.exists(dest_path):
+                                try:
+                                    os.remove(dest_path)
+                                except OSError:
+                                    pass
+                            st.error(f"Failed to save display image: {e}")
+                            st.stop()
+
                         new_case_details = RegisteredCases(
                             id=unique_id,
                             submitted_by=user,
@@ -428,7 +453,17 @@ with form_col:
                             status="NF",
                             matched_with="",
                         )
-                        db_queries.register_new_case(new_case_details)
+                        try:
+                            db_queries.register_new_case(new_case_details)
+                        except Exception as e:
+                            if os.path.exists(dest_path):
+                                try:
+                                    os.remove(dest_path)
+                                except OSError:
+                                    pass
+                            st.error(f"Database registration failed: {e}")
+                            st.stop()
+
                         st.session_state["registered_case_id"] = unique_id
                         st.session_state["registered_case_name"] = name.strip()
                         st.rerun()

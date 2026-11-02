@@ -16,10 +16,16 @@ from pages.helper.ui_theme import apply_theme, render_sidebar_user_profile
 from pages.helper.auth_manager import require_auth
 if not require_auth():
     st.switch_page("Home.py")
+    st.stop()
 
 apply_theme()
 user_info = st.session_state.get("user_info", {})
 role = st.session_state.get("role", "Officer")
+
+if role == "Reporter":
+    st.error("Use the sighting portal")
+    st.stop()
+
 render_sidebar_user_profile(user_info, role)
 
 PAGE_SIZE = 8
@@ -447,7 +453,7 @@ def render_registered_case_card(case_row, is_admin: bool = False):
 
 
 # ── Public Sighting Case Renderer ────────────────────────────────────────────
-def render_public_case_card(case_row):
+def render_public_case_card(case_row, is_admin: bool = False):
     """
     case_row indices:
     0: id, 1: status, 2: location, 3: mobile, 4: birth_marks,
@@ -545,6 +551,17 @@ def render_public_case_card(case_row):
             '</div>'
             '</div>'
         )
+
+        if is_admin:
+            with st.expander("Record Management (Delete Lead)", expanded=False):
+                confirm_pub_del = st.checkbox("Confirm lead deletion", key=f"confirm_pub_del_{case_id}")
+                if st.button("Delete Lead", key=f"del_pub_btn_{case_id}", type="primary", use_container_width=True):
+                    if confirm_pub_del:
+                        db_queries.delete_public_case(case_id, actor_username=st.session_state.get("user", "admin"))
+                        st.success("Sighting lead deleted.")
+                        st.rerun()
+                    else:
+                        st.warning("Check confirmation box first.")
 
     st.html("<div style='height: 12px;'></div>")
 
@@ -764,7 +781,7 @@ if status_filter == "Public Cases":
     else:
         paginated_public, render_public_controls = paginate(raw_public_data, "page_cases")
         for pub_case in paginated_public:
-            render_public_case_card(pub_case)
+            render_public_case_card(pub_case, is_admin=is_admin)
         render_public_controls()
 
 # ── Branch: Registered Missing Person Cases View ──────────────────────────────

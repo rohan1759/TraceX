@@ -10,11 +10,17 @@ st.set_page_config(
 from pages.helper.auth_manager import require_auth
 if not require_auth():
     st.switch_page("Home.py")
+    st.stop()
 
 from pages.helper.ui_theme import apply_theme, render_sidebar_user_profile
 apply_theme()
 user_info = st.session_state.get("user_info", {})
 role = st.session_state.get("role", "Officer")
+
+if role == "Reporter":
+    st.error("Use the sighting portal")
+    st.stop()
+
 render_sidebar_user_profile(user_info, role)
 
 from sqlmodel import Session, select
@@ -49,7 +55,8 @@ def confirm_match_action(registered_case_id: str, public_case_id: str, case_deta
         st.info("This case has already been resolved or marked as Found.")
         st.session_state["confirmed_matches"].add(pair_key)
         return
-    db_queries.update_found_status(registered_case_id, public_case_id)
+    actor_user = st.session_state.get("user", "officer")
+    db_queries.update_found_status(registered_case_id, public_case_id, actor_username=actor_user)
     st.session_state["confirmed_matches"].add(pair_key)
     sent = emailer.send_match_notification(registered_case_id, case_details)
     complainant_email = case_details[2] if len(case_details) > 2 else None
